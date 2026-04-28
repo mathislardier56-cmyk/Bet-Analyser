@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>BetAnalyzer Pro</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0f0f0f; color: #e8e8e8; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+input:focus { outline: none; border-color: #4ade80 !important; }
+textarea:focus { outline: none; border-color: #4ade80 !important; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+
+var SYSTEM_PROMPT = "Tu es un expert en paris sportifs football. Tu as acces a la recherche web.\n\nREGLE ABSOLUE : Tu dois VERIFIER les donnees via web search. Ne jamais inventer des resultats de matchs.\nFais EXACTEMENT 3 recherches web :\n1. [equipe1] [equipe2] resultats recents 2026 forme 5 derniers matchs\n2. [equipe1] [equipe2] h2h confrontations directes historique\n3. [equipe1] [equipe2] blesses absents compositions avril 2026\n\nCONNAISSANCES PAR LIGUE :\n- Super Lig Turquie : BTTS et corners eleves. Cartons parfois indisponibles sur Stake.\n- Super League Suisse : Over 0.5 buts quasi certain. BTTS Oui regulier.\n\nRetourne UNIQUEMENT un JSON valide. Commence DIRECTEMENT par { sans aucun texte avant.\n\nFormat:\n{\"competition\":\"string\",\"date\":\"string\",\"lieu\":\"string\",\"contexte\":\"2-3 phrases\",\"forme_domicile\":[{\"match\":\"Arsenal 2-1 Chelsea\",\"comp\":\"PL\",\"resultat\":\"V\"},{\"match\":\"...\",\"comp\":\"...\",\"resultat\":\"N\"},{\"match\":\"...\",\"comp\":\"...\",\"resultat\":\"D\"},{\"match\":\"...\",\"comp\":\"...\",\"resultat\":\"V\"},{\"match\":\"...\",\"comp\":\"...\",\"resultat\":\"V\"}],\"forme_exterieur\":[{\"match\":\"...\",\"comp\":\"...\",\"resultat\":\"V\"},{\"match\":\"...\",\"comp\":\"...\",\"resultat\":\"N\"},{\"match\":\"...\",\"comp\":\"...\",\"resultat\":\"D\"},{\"match\":\"...\",\"comp\":\"...\",\"resultat\":\"V\"},{\"match\":\"...\",\"comp\":\"...\",\"resultat\":\"D\"}],\"h2h\":[{\"match\":\"Arsenal 2-1 Newcastle\",\"date\":\"Oct 2024\",\"resultat\":\"Arsenal\"},{\"match\":\"...\",\"date\":\"...\",\"resultat\":\"...\"},{\"match\":\"...\",\"date\":\"...\",\"resultat\":\"...\"},{\"match\":\"...\",\"date\":\"...\",\"resultat\":\"...\"},{\"match\":\"...\",\"date\":\"...\",\"resultat\":\"...\"}],\"absences\":{\"domicile\":[\"Joueur (raison)\"],\"exterieur\":[\"Joueur (raison)\"]},\"stats\":{\"domicile\":{\"buts_pour\":1.8,\"buts_contre\":0.9,\"corners_moy\":6.2,\"cartons_moy\":2.1,\"clean_sheets\":\"4/15\"},\"exterieur\":{\"buts_pour\":1.4,\"buts_contre\":1.2,\"corners_moy\":4.8,\"cartons_moy\":1.8,\"clean_sheets\":\"2/15\"}},\"joueurs_cles\":{\"domicile\":[{\"nom\":\"Saka\",\"role\":\"Ailier\",\"buts_saison\":12,\"passes_saison\":8}],\"exterieur\":[{\"nom\":\"Isak\",\"role\":\"Attaquant\",\"buts_saison\":15,\"passes_saison\":4}]},\"probabilites\":{\"victoire_dom\":52,\"nul\":24,\"victoire_ext\":24,\"btts_oui\":58,\"over25\":62,\"over35\":28,\"over85_corners\":65,\"over95_corners\":48,\"over25_cartons\":60},\"tendances\":\"2-3 phrases cles\"}";
+
+function callClaude(body) {
+  return fetch('/api/analyze', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(function(res) {
+    if (!res.ok) throw new Error('Erreur API ' + res.status);
+    return res.json();
+  }).then(function(data) {
+    return data.content.filter(function(b) { return b.type === 'text'; }).map(function(b) { return b.text; }).join('\n');
+  });
+}
+
+function callClaudeAnalyze(userMsg) {
+  return callClaude({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 4000,
+    system: SYSTEM_PROMPT,
+    tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+    messages: [{ role: 'user', content: userMsg }],
+  });
+}
+
+function parseJSON(text) {
+  var attempts = [];
+  var fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/g) || [];
+  fenced.forEach(function(m) { attempts.push(m.replace(/```(?:json)?/, '').replace(/```$/, '').trim()); });
+  var depth = 0, start = -1;
+  for (var i = 0; i < text.length; i++) {
+    if (text[i] === '{') { if (depth === 0) start = i; depth++; }
+    else if (text[i] === '}') { depth--; if (depth === 0 && start !== -1) { attempts.push(text.slice(start, i + 1)); start = -1; } }
+  }
+  for (var j = 0; j < attempts.length; j++) {
+    try { var p = JSON.parse(attempts[j]); if (p && typeof p === 'object') return p; } catch(e) {}
+  }
+  return null;
+}
+
+var STEPS = [
+  { label: 'Recherche forme recente...', pct: 15 },
+  { label: 'Analyse confrontations H2H...', pct: 35 },
+  { label: 'Verification des absences...', pct: 55 },
+  { label: 'Calcul des probabilites...', pct: 75 },
+  { label: 'Finalisation...', pct: 90 },
+];
+
+var SECTION_COLORS = ['#60a5fa','#34d399','#fbbf24','#f87171','#fb923c','#fb923c','#a78bfa'];
+
+var MARKET_BADGES = {
+  result: { label: 'Resultat', color: '#60a5fa', bg: '#1e3a5f' },
+  handicap: { label: 'Handicap', color: '#a78bfa', bg: '#2d1f5e' },
+  buts: { label: 'Buts', color: '#34d399', bg: '#064e3b' },
+  corners: { label: 'Corners', color: '#fbbf24', bg: '#451a03' },
+  cartons: { label: 'Cartons', color: '#f87171', bg: '#450a0a' },
+  joueurs: { label: 'Joueurs', color: '#fb923c', bg: '#431407' },
+};
+
+function getMarketBadge(id) {
+  if (!id) return MARKET_BADGES.result;
+  if (id === 'f-draw' || (id.includes('home') && !id.includes('co') && !id.includes('card') && !id.includes('but') && !id.includes('ass') && !id.includes('ts') && !id.includes('hc') && !id.includes('1up')) || (id.includes('away') && !id.includes('1up'))) return MARKET_BADGES.result;
+  if (id.includes('1up') || id.includes('hc')) return MARKET_BADGES.handicap;
+  if (id.includes('btts') || id.includes('o05') || id.includes('o15') || id.includes('o25') || id.includes('o35') || id.includes('u25') || id.includes('u35') || id.includes('h1')) return MARKET_BADGES.buts;
+  if (id.includes('co') || id.includes('cu')) return MARKET_BADGES.corners;
+  if (id.includes('card')) return MARKET_BADGES.cartons;
+  if (id.includes('but') || id.includes('ass') || id.includes('ts')) return MARKET_BADGES.joueurs;
+  return MARKET_BADGES.result;
+}
+
+function getMarches(h, a) {
+  return [
+    { section: 'Resultat & 1UP', fields: [
+      { id: 'f-home', label: 'Victoire ' + h },
+      { id: 'f-draw', label: 'Match nul' },
+      { id: 'f-away', label: 'Victoire ' + a },
+      { id: 'f-1up-home', label: '1UP ' + h },
+      { id: 'f-1up-away', label: '1UP ' + a },
+      { id: 'f-hc15h', label: 'Handicap ' + h + ' -1,5' },
+      { id: 'f-hc25h', label: 'Handicap ' + h + ' -2,5' },
+    ]},
+    { section: 'Buts', fields: [
+      { id: 'f-o05', label: 'Over 0,5 buts' },
+      { id: 'f-o15', label: 'Over 1,5 buts' },
+      { id: 'f-o25', label: 'Over 2,5 buts' },
+      { id: 'f-u25', label: 'Under 2,5 buts' },
+      { id: 'f-o35', label: 'Over 3,5 buts' },
+      { id: 'f-u35', label: 'Under 3,5 buts' },
+      { id: 'f-btts-y', label: 'BTTS Oui' },
+      { id: 'f-btts-n', label: 'BTTS Non' },
+      { id: 'f-o05h1', label: 'Over 0,5 buts 1ere MT' },
+      { id: 'f-o15h1', label: 'Over 1,5 buts 1ere MT' },
+    ]},
+    { section: 'Corners', fields: [
+      { id: 'f-co85', label: 'Over 8,5 corners' },
+      { id: 'f-co95', label: 'Over 9,5 corners' },
+      { id: 'f-co105', label: 'Over 10,5 corners' },
+      { id: 'f-cu85', label: 'Under 8,5 corners' },
+      { id: 'f-home-co45', label: h + ' Over 4,5 corners' },
+      { id: 'f-away-co45', label: a + ' Over 4,5 corners' },
+    ]},
+    { section: 'Cartons', fields: [
+      { id: 'f-cards25', label: 'Over 2,5 cartons' },
+      { id: 'f-cards35', label: 'Over 3,5 cartons' },
+      { id: 'f-cards45', label: 'Over 4,5 cartons' },
+      { id: 'f-p1-card', label: 'Joueur cartonne', isPlayer: true, nameId: 'f-p1-card-name' },
+    ]},
+    { section: 'Buteurs', fields: [
+      { id: 'f-p1-but', label: 'Buteur 1', isPlayer: true, nameId: 'f-p1-but-name' },
+      { id: 'f-p2-but', label: 'Buteur 2', isPlayer: true, nameId: 'f-p2-but-name' },
+      { id: 'f-p3-but', label: 'Buteur 3', isPlayer: true, nameId: 'f-p3-but-name' },
+    ]},
+    { section: 'Passeurs', fields: [
+      { id: 'f-p1-ass', label: 'Passeur 1', isPlayer: true, nameId: 'f-p1-ass-name' },
+      { id: 'f-p2-ass', label: 'Passeur 2', isPlayer: true, nameId: 'f-p2-ass-name' },
+    ]},
+    { section: 'Tirs cadres (1+)', fields: [
+      { id: 'f-ts-p1', label: '1+ tir cadre', isPlayer: true, nameId: 'f-ts-p1-name' },
+      { id: 'f-ts-p2', label: '1+ tir cadre', isPlayer: true, nameId: 'f-ts-p2-name' },
+      { id: 'f-ts-p3', label: '1+ tir cadre', isPlayer: true, nameId: 'f-ts-p3-name' },
+    ]},
+  ];
+}
+
+function getProb(id, analysis) {
+  var p = (analysis && analysis.probabilites) ? analysis.probabilites : {};
+  var map = {
+    'f-home': p.victoire_dom, 'f-draw': p.nul, 'f-away': p.victoire_ext,
+    'f-1up-home': p.victoire_dom, 'f-1up-away': p.victoire_ext,
+    'f-o05': 95, 'f-o25': p.over25,
+    'f-u25': p.over25 ? 100 - p.over25 : null,
+    'f-o35': p.over35, 'f-u35': p.over35 ? 100 - p.over35 : null,
+    'f-btts-y': p.btts_oui, 'f-btts-n': p.btts_oui ? 100 - p.btts_oui : null,
+    'f-co85': p.over85_corners, 'f-co95': p.over95_corners,
+    'f-cards25': p.over25_cartons,
+  };
+  return (map[id] !== undefined) ? map[id] : null;
+}
+
+function getConf(id, cote, analysis) {
+  var prob = getProb(id, analysis);
+  if (prob != null) return Math.min(97, Math.round(prob));
+  var fb = {
+    'f-o05': 94, 'f-o15': cote <= 1.4 ? 85 : cote <= 1.6 ? 78 : 68,
+    'f-o25': cote <= 1.65 ? 75 : cote <= 1.85 ? 68 : 58,
+    'f-u25': cote <= 1.6 ? 72 : cote <= 1.9 ? 65 : 55,
+    'f-o35': cote <= 2.2 ? 55 : 45,
+    'f-btts-y': cote <= 1.7 ? 70 : cote <= 2 ? 62 : 52,
+    'f-btts-n': cote <= 1.6 ? 72 : cote <= 1.9 ? 65 : 55,
+    'f-co85': cote <= 1.5 ? 80 : cote <= 1.7 ? 73 : 63,
+    'f-co95': cote <= 1.7 ? 70 : cote <= 1.9 ? 63 : 53,
+    'f-cards25': cote <= 1.5 ? 76 : cote <= 1.7 ? 68 : 58,
+    'f-home': cote <= 1.3 ? 86 : cote <= 1.5 ? 80 : cote <= 1.7 ? 73 : cote <= 2 ? 63 : 50,
+    'f-away': cote <= 1.3 ? 84 : cote <= 1.5 ? 78 : cote <= 1.7 ? 71 : cote <= 2 ? 61 : 48,
+    'f-draw': 35,
+    'f-1up-home': cote <= 1.5 ? 78 : cote <= 1.8 ? 70 : 60,
+    'f-1up-away': cote <= 1.5 ? 74 : cote <= 1.8 ? 66 : 56,
+  };
+  return (fb[id] !== undefined) ? fb[id] : (cote <= 1.6 ? 70 : cote <= 2 ? 60 : cote <= 2.5 ? 50 : 40);
+}
+
+var S = {
+  page: { minHeight: '100vh', background: '#0f0f0f', color: '#e8e8e8', padding: '16px', maxWidth: 620, margin: '0 auto' },
+  card: { background: '#1a1a1a', border: '1px solid #2a2a2a', borderRadius: 12, padding: '14px 16px', marginBottom: 12 },
+  stitle: { fontSize: 13, fontWeight: 600, color: '#fff', marginBottom: 10, paddingBottom: 8, borderBottom: '1px solid #2a2a2a' },
+  input: { background: '#242424', border: '1px solid #333', borderRadius: 8, padding: '8px 10px', color: '#e8e8e8', fontSize: 13, width: '100%', boxSizing: 'border-box' },
+  btnPrimary: { background: '#4ade80', color: '#000', border: 'none', borderRadius: 8, padding: '12px 20px', fontWeight: 700, fontSize: 14, cursor: 'pointer', width: '100%', marginTop: 8 },
+  btnSec: { background: '#1a1a1a', color: '#aaa', border: '1px solid #2a2a2a', borderRadius: 8, padding: '10px 20px', fontSize: 14, cursor: 'pointer', width: '100%', marginTop: 8 },
+  btnSm: { background: '#1a1a1a', color: '#aaa', border: '1px solid #2a2a2a', borderRadius: 8, padding: '6px 12px', fontSize: 12, cursor: 'pointer' },
+  btnGreen: { background: 'transparent', color: '#4ade80', border: '1px solid #4ade80', borderRadius: 8, padding: '5px 11px', fontSize: 12, cursor: 'pointer' },
+  btnRed: { background: 'transparent', color: '#f87171', border: '1px solid #f87171', borderRadius: 8, padding: '5px 11px', fontSize: 12, cursor: 'pointer' },
+  metric: { background: '#242424', borderRadius: 10, padding: '10px 12px', flex: 1 },
+  tipBox: { background: '#1a2a1a', borderRadius: 10, padding: '10px 14px', marginBottom: 12, fontSize: 13, color: '#aaa', lineHeight: 1.6, borderLeft: '3px solid #4ade80' },
+};
+
+function tabStyle(active) {
+  return { padding: '7px 16px', borderRadius: 8, fontSize: 13, cursor: 'pointer', border: '1px solid #2a2a2a', color: active ? '#000' : '#aaa', background: active ? '#fff' : '#1a1a1a', fontWeight: active ? 600 : 400 };
+}
+function badgeStyle(cat) {
+  if (cat === 'safe') return { background: '#14532d', color: '#4ade80', display: 'inline-block', fontSize: 12, padding: '3px 10px', borderRadius: 6, fontWeight: 600 };
+  if (cat === 'mitige') return { background: '#422006', color: '#fb923c', display: 'inline-block', fontSize: 12, padding: '3px 10px', borderRadius: 6, fontWeight: 600 };
+  return { background: '#450a0a', color: '#f87171', display: 'inline-block', fontSize: 12, padding: '3px 10px', borderRadius: 6, fontWeight: 600 };
+}
+function resBadge(r) {
+  if (r === 'V') return { bg: '#14532d', color: '#4ade80' };
+  if (r === 'D') return { bg: '#450a0a', color: '#f87171' };
+  return { bg: '#1c1917', color: '#fb923c' };
+}
+
+function ProbBar(props) {
+  var c = props.color || '#4ade80';
+  return React.createElement('div', { style: { marginBottom: 8 } },
+    React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#aaa', marginBottom: 3 } },
+      React.createElement('span', null, props.label),
+      React.createElement('span', { style: { color: c, fontWeight: 700 } }, (props.value || 0) + '%')
+    ),
+    React.createElement('div', { style: { background: '#2a2a2a', borderRadius: 4, height: 6 } },
+      React.createElement('div', { style: { width: Math.min(props.value || 0, 100) + '%', background: c, borderRadius: 4, height: 6 } })
+    )
+  );
+}
+
+function ProgressScreen(props) {
+  return React.createElement('div', { style: Object.assign({}, S.card, { padding: '32px 24px', textAlign: 'center' }) },
+    React.createElement('div', { style: { fontSize: 36, marginBottom: 16 } }, '⚽'),
+    React.createElement('p', { style: { color: '#fff', fontWeight: 700, fontSize: 15, marginBottom: 4 } }, 'Analyse en cours...'),
+    React.createElement('p', { style: { color: '#555', fontSize: 12, marginBottom: 24 } }, props.matchName),
+    React.createElement('div', { style: { background: '#2a2a2a', borderRadius: 8, height: 10, marginBottom: 8, overflow: 'hidden' } },
+      React.createElement('div', { style: { height: 10, borderRadius: 8, background: 'linear-gradient(90deg,#16a34a,#4ade80)', width: props.pct + '%', transition: 'width 1.2s ease-in-out' } })
+    ),
+    React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', marginBottom: 24 } },
+      React.createElement('span', { style: { fontSize: 12, color: '#aaa' } }, props.label),
+      React.createElement('span', { style: { fontSize: 13, color: '#4ade80', fontWeight: 700 } }, props.pct + '%')
+    ),
+    React.createElement('div', { style: { textAlign: 'left' } },
+      STEPS.map(function(s, i) {
+        var done = props.pct > s.pct;
+        var active = props.pct >= (i === 0 ? 1 : STEPS[i-1].pct) && props.pct <= s.pct;
+        return React.createElement('div', { key: i, style: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 } },
+          React.createElement('div', { style: { width: 22, height: 22, borderRadius: '50%', flexShrink: 0, background: done ? '#16a34a' : active ? '#4ade8033' : '#1a1a1a', border: '2px solid ' + (done ? '#16a34a' : active ? '#4ade80' : '#333'), display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, color: done ? '#fff' : active ? '#4ade80' : '#444', fontWeight: 700 } }, done ? '✓' : i + 1),
+          React.createElement('span', { style: { fontSize: 12, color: done ? '#4ade80' : active ? '#fff' : '#444' } }, s.label)
+        );
+      })
+    ),
+    React.createElement('p', { style: { fontSize: 11, color: '#333', marginTop: 16 } }, 'Environ 20-40 secondes')
+  );
+}
+
+function ValueScore(props) {
+  var bets = props.bets;
+  if (!bets || bets.length === 0) return null;
+  var valueBets = bets.filter(function(b) { return b.value; });
+  var avgConf = Math.round(bets.reduce(function(a, b) { return a + b.conf; }, 0) / bets.length);
+  var valueScore = Math.min(100, Math.round((valueBets.length / Math.max(bets.length, 1)) * 100 * 0.5 + avgConf * 0.5));
+  var scoreColor = valueScore >= 70 ? '#4ade80' : valueScore >= 50 ? '#fb923c' : '#f87171';
+  var scoreLabel = valueScore >= 70 ? 'Excellent' : valueScore >= 50 ? 'Correct' : 'Faible';
+  return React.createElement('div', { style: { background: '#1a1a1a', border: '1px solid #2a2a2a', borderRadius: 12, padding: '12px 16px', marginBottom: 14 } },
+    React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 } },
+      React.createElement('div', null,
+        React.createElement('p', { style: { fontSize: 13, fontWeight: 700, color: '#fff', marginBottom: 2 } }, 'Score de value global'),
+        React.createElement('p', { style: { fontSize: 11, color: '#555' } }, valueBets.length + ' value bet' + (valueBets.length > 1 ? 's' : '') + ' - Confiance moy. ' + avgConf + '%')
+      ),
+      React.createElement('div', { style: { textAlign: 'right' } },
+        React.createElement('p', { style: { fontSize: 28, fontWeight: 800, color: scoreColor, lineHeight: 1 } }, valueScore),
+        React.createElement('p', { style: { fontSize: 11, color: scoreColor, fontWeight: 600 } }, scoreLabel)
+      )
+    ),
+    React.createElement('div', { style: { background: '#2a2a2a', borderRadius: 6, height: 8, overflow: 'hidden' } },
+      React.createElement('div', { style: { width: valueScore + '%', background: scoreColor, height: 8, borderRadius: 6 } })
+    )
+  );
+}
+
+function App() {
+  var useState = React.useState;
+  var useRef = React.useRef;
+
+  var tabState = useState('analyse'); var tab = tabState[0]; var setTab = tabState[1];
+  var stepState = useState('form'); var step = stepState[0]; var setStep = stepState[1];
+  var homeState = useState(''); var home = homeState[0]; var setHome = homeState[1];
+  var awayState = useState(''); var away = awayState[0]; var setAway = awayState[1];
+  var compState = useState(''); var comp = compState[0]; var setComp = compState[1];
+  var bankrollState = useState('10'); var bankroll = bankrollState[0]; var setBankroll = bankrollState[1];
+  var pctState = useState(0); var pct = pctState[0]; var setPct = pctState[1];
+  var pctLabelState = useState(''); var pctLabel = pctLabelState[0]; var setPctLabel = pctLabelState[1];
+  var analysisState = useState(null); var analysis = analysisState[0]; var setAnalysis = analysisState[1];
+  var coteValuesState = useState({}); var coteValues = coteValuesState[0]; var setCoteValues = coteValuesState[1];
+  var playerNamesState = useState({}); var playerNames = playerNamesState[0]; var setPlayerNames = playerNamesState[1];
+  var betsState = useState([]); var bets = betsState[0]; var setBets = betsState[1];
+  var panierState = useState([]); var panier = panierState[0]; var setPanier = panierState[1];
+  var errorState = useState(''); var error = errorState[0]; var setError = errorState[1];
+  var ivRef = useRef(null);
+
+  var bk = parseFloat(bankroll) || 10;
+  var matchName = (home && away) ? home + ' vs ' + away : '';
+
+  function isTurquie(c) { return /s[uü]per\s*li[gk]/i.test(c) || /turqu/i.test(c); }
+  function isSuisse(c) { return /super\s*league/i.test(c) && /suisse|swiss/i.test(c); }
+
+  function startProgress() {
+    setPct(5); setPctLabel(STEPS[0].label);
+    var si = 0;
+    ivRef.current = setInterval(function() {
+      si++;
+      if (si < STEPS.length) { setPct(STEPS[si].pct); setPctLabel(STEPS[si].label); }
+    }, 6000);
+  }
+
+  function stopProgress() {
+    if (ivRef.current) { clearInterval(ivRef.current); ivRef.current = null; }
+    setPct(100);
+    setTimeout(function() { setPct(0); setPctLabel(''); }, 600);
+  }
+
+  function launchAnalysis() {
+    if (!home || !away) { setError('Entre les deux equipes !'); return; }
+    setError(''); setStep('analysing'); setAnalysis(null);
+    startProgress();
+    var msg = 'Analyse ce match : ' + matchName + (comp ? ', ' + comp : '') + '. Cherche les vrais resultats des 5 derniers matchs de chaque equipe, le H2H recent et les absences. Ne pas inventer de resultats. Retourne UNIQUEMENT le JSON demande, commence directement par {.';
+    callClaudeAnalyze(msg).then(function(raw) {
+      var parsed = parseJSON(raw);
+      if (!parsed) { setError('Reponse invalide - reessaie.'); setStep('form'); stopProgress(); return; }
+      var allJ = ((parsed.joueurs_cles && parsed.joueurs_cles.domicile) ? parsed.joueurs_cles.domicile : []).concat((parsed.joueurs_cles && parsed.joueurs_cles.exterieur) ? parsed.joueurs_cles.exterieur : []);
+      var topB = allJ.slice().sort(function(a,b) { return (b.buts_saison||0)-(a.buts_saison||0); });
+      var topP = allJ.slice().sort(function(a,b) { return (b.passes_saison||0)-(a.passes_saison||0); });
+      setPlayerNames({ 'f-p1-but-name': topB[0]?topB[0].nom:'', 'f-p2-but-name': topB[1]?topB[1].nom:'', 'f-p3-but-name': topB[2]?topB[2].nom:'', 'f-p1-ass-name': topP[0]?topP[0].nom:'', 'f-p2-ass-name': topP[1]?topP[1].nom:'', 'f-ts-p1-name': topB[0]?topB[0].nom:'', 'f-ts-p2-name': topB[1]?topB[1].nom:'', 'f-ts-p3-name': topB[2]?topB[2].nom:'' });
+      setAnalysis(parsed);
+      setCoteValues(function(prev) { return Object.keys(prev).length > 0 ? prev : {}; });
+      stopProgress(); setStep('cotes');
+    }).catch(function(e) { setError('Erreur : ' + e.message); setStep('form'); stopProgress(); });
+  }
+
+  function analyzeOdds() {
+    var result = [];
+    getMarches(home, away).forEach(function(section) {
+      section.fields.forEach(function(f) {
+        var cote = parseFloat(coteValues[f.id]);
+        if (!cote || cote <= 0) return;
+        var pName = f.isPlayer ? (playerNames[f.nameId] || '') : '';
+        var nom = pName ? pName + ' - ' + f.label : f.label;
+        var conf = getConf(f.id, cote, analysis);
+        var impl = Math.round((1/cote)*100);
+        var probEst = (getProb(f.id, analysis) !== null) ? getProb(f.id, analysis) : conf;
+        var value = probEst - impl >= 3;
+        var kelly = Math.max(0, ((probEst/100 - impl/100)/(cote-1))*bk);
+        var mise = +Math.min(bk*0.2, kelly).toFixed(2);
+        var cat = conf >= 80 ? 'safe' : conf >= 60 ? 'mitige' : 'fun';
+        result.push({ id: f.id, nom: nom, cote: cote, conf: conf, impl: impl, probEst: probEst, value: value, mise: mise, cat: cat, match: matchName });
+      });
+    });
+    setBets(result); setStep('results');
+  }
+
+  function addToPanier(bet) { setPanier(function(p) { return p.filter(function(x) { return x.match !== bet.match; }).concat([bet]); }); }
+  function removeFromPanier(i) { setPanier(function(p) { return p.filter(function(_, idx) { return idx !== i; }); }); }
+
+  var panierCote = panier.reduce(function(a,b) { return a*b.cote; }, 1);
+  var panierAvg = panier.length ? panier.reduce(function(a,b) { return a+b.conf; }, 0)/panier.length : 0;
+  var panierPctVal = panierAvg >= 80 ? 0.15 : panierAvg >= 60 ? 0.10 : 0.05;
+  var panierMise = +Math.min(bk*panierPctVal, bk).toFixed(2);
+  var panierGain = +(panierMise*panierCote).toFixed(2);
+  var safeBets = bets.filter(function(b) { return b.cat === 'safe'; });
+  var mitigeBets = bets.filter(function(b) { return b.cat === 'mitige'; });
+  var funBets = bets.filter(function(b) { return b.cat === 'fun'; });
+  var bestBet = bets.reduce(function(a,b) { return (!a||b.conf>a.conf)?b:a; }, null);
+  var compStr = comp || (analysis && analysis.competition) || '';
+
+  function BetRow(props) {
+    var bet = props.bet;
+    var inP = panier.some(function(p) { return p.match === bet.match && p.nom === bet.nom; });
+    var badge = getMarketBadge(bet.id);
+    var confColor = bet.conf >= 80 ? '#4ade80' : bet.conf >= 60 ? '#fb923c' : '#f87171';
+    return React.createElement('div', { style: { padding: '10px 0', borderBottom: '1px solid #1e1e1e' } },
+      React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 } },
+        React.createElement('div', { style: { flex: 1 } },
+          React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 } },
+            React.createElement('span', { style: { background: badge.bg, color: badge.color, fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 5, textTransform: 'uppercase', letterSpacing: 0.5 } }, badge.label),
+            React.createElement('p', { style: { fontSize: 14, color: '#e8e8e8', fontWeight: 500, margin: 0 } }, bet.nom)
+          ),
+          React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+            React.createElement('span', { style: { fontSize: 12, color: '#888' } }, 'x' + bet.cote.toFixed(2)),
+            bet.value && React.createElement('span', { style: { fontSize: 11, color: '#4ade80', fontWeight: 700, background: '#052e16', padding: '1px 6px', borderRadius: 4 } }, 'VALUE'),
+            bet.mise > 0 && React.createElement('span', { style: { fontSize: 11, color: '#888' } }, 'Kelly: ' + bet.mise)
+          )
+        ),
+        React.createElement('button', { style: Object.assign({}, S.btnGreen, { opacity: inP ? 0.4 : 1, flexShrink: 0 }), disabled: inP, onClick: function() { addToPanier(bet); } }, inP ? '✓' : '+ Panier')
+      ),
+      React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+        React.createElement('div', { style: { flex: 1, background: '#2a2a2a', borderRadius: 4, height: 5, overflow: 'hidden' } },
+          React.createElement('div', { style: { width: bet.conf + '%', background: confColor, height: 5, borderRadius: 4 } })
+        ),
+        React.createElement('span', { style: { fontSize: 12, color: confColor, fontWeight: 700, minWidth: 36, textAlign: 'right' } }, bet.conf + '%')
+      )
+    );
+  }
+
+  function BetSection(props) {
+    var list = props.bets;
+    return React.createElement('div', { style: S.card },
+      React.createElement('div', { style: { marginBottom: 10 } }, React.createElement('span', { style: badgeStyle(props.cat) }, props.label)),
+      list.length === 0 ? React.createElement('p', { style: { fontSize: 13, color: '#555' } }, 'Aucun pari dans cette categorie.')
+        : list.slice().sort(function(a,b) { return b.conf-a.conf; }).map(function(b,i) { return React.createElement(BetRow, { key: i, bet: b }); })
+    );
+  }
+
+  var e = React.createElement;
+
+  return e('div', { style: S.page },
+    e('h1', { style: { fontSize: 22, fontWeight: 700, color: '#fff', marginBottom: 2 } }, '⚽ BetAnalyzer Pro'),
+    e('p', { style: { fontSize: 13, color: '#666', marginBottom: 20 } }, 'Analyse IA + Web - Paris intelligents'),
+
+    e('div', { style: { display: 'flex', gap: 8, marginBottom: 20 } },
+      e('button', { style: tabStyle(tab === 'analyse'), onClick: function() { setTab('analyse'); } }, 'Analyser un match'),
+      e('button', { style: tabStyle(tab === 'panier'), onClick: function() { setTab('panier'); } },
+        'Panier ',
+        e('span', { style: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 18, height: 18, borderRadius: '50%', background: '#4ade80', color: '#000', fontSize: 11, fontWeight: 700, marginLeft: 5 } }, panier.length)
+      )
+    ),
+
+    tab === 'analyse' && e('div', null,
+      step === 'form' && e('div', null,
+        e('div', { style: S.card },
+          e('p', { style: S.stitle }, 'Le match'),
+          [['Equipe domicile', home, setHome, 'Ex : PSG'], ['Equipe exterieur', away, setAway, 'Ex : Bayern'], ['Competition (optionnel)', comp, setComp, 'Ex : Champions League']].map(function(item) {
+            return e('div', { key: item[0], style: { marginBottom: 8 } },
+              e('label', { style: { fontSize: 12, color: '#888', display: 'block', marginBottom: 4 } }, item[0]),
+              e('input', { style: S.input, value: item[1], onChange: function(ev) { item[2](ev.target.value); }, placeholder: item[3] })
+            );
+          }),
+          e('div', null,
+            e('label', { style: { fontSize: 12, color: '#888', display: 'block', marginBottom: 4 } }, 'Bankroll (USDT)'),
+            e('input', { style: Object.assign({}, S.input, { width: 120 }), type: 'number', value: bankroll, onChange: function(ev) { setBankroll(ev.target.value); } })
+          )
+        ),
+        error && e('p', { style: { color: '#f87171', fontSize: 13, marginBottom: 8 } }, error),
+        e('button', { style: S.btnPrimary, onClick: launchAnalysis }, 'Lancer l\'analyse IA'),
+        e('p', { style: { fontSize: 12, color: '#444', marginTop: 8, textAlign: 'center' } }, 'Recherche stats reelles, forme, H2H et absences via internet')
+      ),
+
+      step === 'analysing' && e(ProgressScreen, { pct: pct, label: pctLabel, matchName: matchName }),
+
+      step === 'cotes' && analysis && e('div', null,
+        e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 } },
+          e('div', null,
+            e('h2', { style: { fontSize: 18, fontWeight: 700, color: '#fff' } }, matchName),
+            e('p', { style: { fontSize: 13, color: '#666' } }, analysis.competition || comp || 'Football')
+          ),
+          e('button', { style: S.btnSm, onClick: function() { setStep('form'); } }, 'Retour')
+        ),
+        isTurquie(compStr) && e('div', { style: { background: '#2a1a00', border: '1px solid rgba(251,146,60,0.3)', borderRadius: 10, padding: '10px 14px', marginBottom: 12, fontSize: 13, color: '#fb923c' } }, 'Super Lig - BTTS et corners eleves. Cartons parfois indisponibles sur Stake.'),
+        isSuisse(compStr) && e('div', { style: { background: '#1a2a1a', border: '1px solid rgba(74,222,128,0.3)', borderRadius: 10, padding: '10px 14px', marginBottom: 12, fontSize: 13, color: '#4ade80' } }, 'Super League Suisse - Over 0.5 quasi certain. BTTS Oui regulier.'),
+        analysis.contexte && e('div', { style: S.tipBox }, e('strong', { style: { color: '#4ade80' } }, 'Contexte : '), analysis.contexte),
+
+        e('div', { style: S.card },
+          e('p', { style: S.stitle }, 'Forme recente - 5 derniers matchs'),
+          [['🏠 ' + home, analysis.forme_domicile], ['✈️ ' + away, analysis.forme_exterieur]].map(function(item) {
+            return e('div', { key: item[0], style: { marginBottom: 12 } },
+              e('p', { style: { fontSize: 12, color: '#888', marginBottom: 6, fontWeight: 600 } }, item[0]),
+              (item[1] || []).map(function(m, i) {
+                var b = resBadge(m.resultat);
+                return e('div', { key: i, style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 8px', borderRadius: 8, marginBottom: 4, background: '#111' } },
+                  e('span', { style: { fontSize: 13, color: '#ccc' } }, m.match),
+                  e('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+                    e('span', { style: { fontSize: 11, color: '#555' } }, m.comp),
+                    e('span', { style: { background: b.bg, color: b.color, fontSize: 12, fontWeight: 800, padding: '3px 10px', borderRadius: 6, minWidth: 28, textAlign: 'center' } }, m.resultat)
+                  )
+                );
+              })
+            );
+          })
+        ),
+
+        analysis.h2h && analysis.h2h.length > 0 && e('div', { style: S.card },
+          e('p', { style: S.stitle }, 'Confrontations H2H'),
+          analysis.h2h.map(function(m, i) {
+            return e('div', { key: i, style: { display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: '1px solid #1e1e1e', fontSize: 13 } },
+              e('span', { style: { color: '#ccc' } }, m.match),
+              e('span', { style: { color: '#555', fontSize: 11 } }, m.date)
+            );
+          })
+        ),
+
+        analysis.absences && ((analysis.absences.domicile && analysis.absences.domicile.length > 0) || (analysis.absences.exterieur && analysis.absences.exterieur.length > 0)) && e('div', { style: S.card },
+          e('p', { style: S.stitle }, 'Absences'),
+          [['domicile', home], ['exterieur', away]].map(function(item) {
+            var abs = analysis.absences[item[0]];
+            if (!abs || abs.length === 0) return null;
+            return e('div', { key: item[0], style: { marginBottom: 8 } },
+              e('p', { style: { fontSize: 12, color: '#888', marginBottom: 4 } }, item[1]),
+              abs.map(function(j, i) { return e('p', { key: i, style: { fontSize: 13, color: '#f87171', padding: '2px 0' } }, '• ' + j); })
+            );
+          })
+        ),
+
+        analysis.joueurs_cles && e('div', { style: S.card },
+          e('p', { style: S.stitle }, 'Joueurs cles'),
+          [['domicile', home], ['exterieur', away]].map(function(item) {
+            var joueurs = analysis.joueurs_cles[item[0]];
+            if (!joueurs || joueurs.length === 0) return null;
+            return e('div', { key: item[0], style: { marginBottom: 10 } },
+              e('p', { style: { fontSize: 12, color: '#888', marginBottom: 6 } }, item[1]),
+              e('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
+                joueurs.map(function(j, i) {
+                  return e('div', { key: i, style: { background: '#242424', borderRadius: 8, padding: '6px 10px', fontSize: 12 } },
+                    e('span', { style: { color: '#fff', fontWeight: 600 } }, j.nom),
+                    e('span', { style: { color: '#555', marginLeft: 6 } }, j.buts_saison + 'g ' + j.passes_saison + 'a')
+                  );
+                })
+              )
+            );
+          })
+        ),
+
+        e('div', { style: S.card },
+          e('p', { style: S.stitle }, 'Probabilites estimees'),
+          e('div', { style: { display: 'flex', gap: 8, marginBottom: 14 } },
+            [{ label: home, val: analysis.probabilites && analysis.probabilites.victoire_dom, color: '#4ade80' }, { label: 'Nul', val: analysis.probabilites && analysis.probabilites.nul, color: '#fb923c' }, { label: away, val: analysis.probabilites && analysis.probabilites.victoire_ext, color: '#60a5fa' }].map(function(x, i) {
+              return e('div', { key: i, style: { flex: 1, background: '#242424', borderRadius: 10, padding: '10px 8px', textAlign: 'center' } },
+                e('p', { style: { fontSize: 11, color: '#666', marginBottom: 4 } }, x.label),
+                e('p', { style: { fontSize: 22, fontWeight: 700, color: x.color } }, x.val + '%')
+              );
+            })
+          ),
+          e(ProbBar, { label: 'BTTS Oui', value: analysis.probabilites && analysis.probabilites.btts_oui, color: '#a78bfa' }),
+          e(ProbBar, { label: 'Over 2,5 buts', value: analysis.probabilites && analysis.probabilites.over25, color: '#34d399' }),
+          e(ProbBar, { label: 'Over 8,5 corners', value: analysis.probabilites && analysis.probabilites.over85_corners, color: '#fbbf24' }),
+          e(ProbBar, { label: 'Over 2,5 cartons', value: analysis.probabilites && analysis.probabilites.over25_cartons, color: '#f87171' }),
+          analysis.tendances && e('p', { style: { fontSize: 12, color: '#666', marginTop: 10, lineHeight: 1.6 } }, '💡 ' + analysis.tendances)
+        ),
+
+        e('div', { style: S.card },
+          e('p', { style: S.stitle }, 'Cotes (Stake)'),
+          e('p', { style: { fontSize: 12, color: '#555', marginBottom: 16 } }, 'Saisis les cotes disponibles - utilise Tab pour naviguer rapidement.'),
+          getMarches(home, away).map(function(section, si) {
+            var sColor = SECTION_COLORS[si] || '#9ca3af';
+            return e('div', { key: si, style: { marginBottom: 20 } },
+              e('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 } },
+                e('p', { style: { fontSize: 11, fontWeight: 700, color: sColor, textTransform: 'uppercase', letterSpacing: 0.8, margin: 0 } }, section.section),
+                e('div', { style: { flex: 1, height: 1, background: sColor + '44' } })
+              ),
+              section.fields.map(function(f, fi) {
+                return e('div', { key: fi, style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 7 } },
+                  f.isPlayer
+                    ? [e('input', { key: 'n', style: Object.assign({}, S.input, { flex: '1 1 0' }), placeholder: 'Nom joueur', value: playerNames[f.nameId] || '', onChange: function(ev) { setPlayerNames(function(p) { var n = Object.assign({}, p); n[f.nameId] = ev.target.value; return n; }); } }), e('span', { key: 'l', style: { fontSize: 12, color: '#666', whiteSpace: 'nowrap' } }, f.label)]
+                    : e('label', { style: { fontSize: 13, color: '#aaa', flex: 1 } }, f.label),
+                  e('input', { style: Object.assign({}, S.input, { width: 72, flex: '0 0 72px' }), type: 'number', step: '0.01', placeholder: 'cote', value: coteValues[f.id] || '', onChange: function(ev) { setCoteValues(function(p) { var n = Object.assign({}, p); n[f.id] = ev.target.value; return n; }); } })
+                );
+              })
+            );
+          }),
+          e('div', { style: { marginTop: 8 } },
+            e('label', { style: { fontSize: 12, color: '#888', display: 'block', marginBottom: 4 } }, 'Bankroll (USDT)'),
+            e('input', { style: Object.assign({}, S.input, { width: 120 }), type: 'number', value: bankroll, onChange: function(ev) { setBankroll(ev.target.value); } })
+          )
+        ),
+        e('button', { style: S.btnPrimary, onClick: analyzeOdds }, 'Analyser les paris'),
+        e('button', { style: S.btnSec, onClick: function() { setStep('form'); } }, 'Changer de match')
+      ),
+
+      step === 'results' && e('div', null,
+        e('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 } },
+          e('div', null,
+            e('h2', { style: { fontSize: 18, fontWeight: 700, color: '#fff' } }, matchName),
+            e('p', { style: { fontSize: 13, color: '#666' } }, bets.length + ' paris - ' + safeBets.length + ' en zone verte')
+          ),
+          e('button', { style: S.btnSm, onClick: function() { setStep('cotes'); } }, 'Modifier')
+        ),
+        e('div', { style: { display: 'flex', gap: 8, marginBottom: 14 } },
+          e('div', { style: S.metric }, e('p', { style: { fontSize: 11, color: '#888', marginBottom: 3 } }, 'Analyses'), e('p', { style: { fontSize: 20, fontWeight: 700 } }, bets.length)),
+          e('div', { style: S.metric }, e('p', { style: { fontSize: 11, color: '#888', marginBottom: 3 } }, 'Zone verte'), e('p', { style: { fontSize: 20, fontWeight: 700, color: '#4ade80' } }, safeBets.length)),
+          e('div', { style: S.metric }, e('p', { style: { fontSize: 11, color: '#888', marginBottom: 3 } }, 'Top'), e('p', { style: { fontSize: 20, fontWeight: 700, color: '#4ade80' } }, bestBet ? bestBet.conf + '%' : '-'))
+        ),
+        e(ValueScore, { bets: bets }),
+        e(BetSection, { bets: safeBets, cat: 'safe', label: '🟢 Safe - 80-100%' }),
+        e(BetSection, { bets: mitigeBets, cat: 'mitige', label: '🟡 Mitige - 60-79%' }),
+        e(BetSection, { bets: funBets, cat: 'fun', label: '🔴 Fun - 40-59%' }),
+        e('button', { style: S.btnSec, onClick: function() { setStep('form'); setHome(''); setAway(''); setComp(''); setAnalysis(null); setBets([]); setCoteValues({}); } }, 'Analyser un autre match')
+      )
+    ),
+
+    tab === 'panier' && e('div', null,
+      e('h2', { style: { fontSize: 18, fontWeight: 700, color: '#fff', marginBottom: 4 } }, 'Panier combine'),
+      e('p', { style: { fontSize: 13, color: '#666', marginBottom: 16 } }, 'Un seul pari par match'),
+      e('div', { style: S.card },
+        panier.length === 0 ? e('p', { style: { fontSize: 13, color: '#555', padding: '8px 0' } }, 'Aucun pari selectionne.')
+          : panier.map(function(b, i) {
+            return e('div', { key: i, style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: '1px solid #222' } },
+              e('div', { style: { flex: 1 } },
+                e('p', { style: { fontSize: 14, fontWeight: 500 } }, b.nom),
+                e('p', { style: { fontSize: 11, color: '#666', marginTop: 2 } }, b.match + ' · ',
+                  e('span', { style: { color: b.cat === 'safe' ? '#4ade80' : b.cat === 'mitige' ? '#fb923c' : '#f87171', fontWeight: 700 } }, b.conf + '%'),
+                  ' · x' + b.cote.toFixed(2))
+              ),
+              e('button', { style: S.btnRed, onClick: function() { removeFromPanier(i); } }, 'Retirer')
+            );
+          })
+      ),
+      panier.length >= 2 && e('div', { style: Object.assign({}, S.card, { border: '1px solid rgba(74,222,128,0.2)', background: '#1a2a1a' }) },
+        e('div', { style: { display: 'flex', gap: 8, marginBottom: 8 } },
+          e('div', { style: S.metric }, e('p', { style: { fontSize: 11, color: '#888', marginBottom: 3 } }, 'Cote totale'), e('p', { style: { fontSize: 20, fontWeight: 700 } }, 'x' + panierCote.toFixed(2))),
+          e('div', { style: S.metric }, e('p', { style: { fontSize: 11, color: '#888', marginBottom: 3 } }, 'Mise'), e('p', { style: { fontSize: 20, fontWeight: 700, color: '#4ade80' } }, panierMise)),
+          e('div', { style: S.metric }, e('p', { style: { fontSize: 11, color: '#888', marginBottom: 3 } }, 'Gain potentiel'), e('p', { style: { fontSize: 20, fontWeight: 700, color: '#4ade80' } }, panierGain))
+        ),
+        e('p', { style: { fontSize: 12, color: '#666' } }, 'Confiance moy. : ' + Math.round(panierAvg) + '% - Mise a ' + Math.round(panierPctVal*100) + '% du bankroll')
+      ),
+      panier.length === 1 && e('div', { style: { background: '#2a1a00', border: '1px solid rgba(251,146,60,0.3)', borderRadius: 8, padding: '10px 14px', fontSize: 12, color: '#fb923c', marginTop: 8 } }, 'Ajoute au moins 2 paris de matchs differents pour un combine.'),
+      panier.length > 0 && e('button', { style: Object.assign({}, S.btnSec, { marginTop: 8, color: '#f87171', borderColor: '#f87171' }), onClick: function() { setPanier([]); } }, 'Vider le panier')
+    ),
+
+    e('p', { style: { fontSize: 11, color: '#2a2a2a', textAlign: 'center', marginTop: 24 } }, 'Les paris sportifs comportent des risques.')
+  );
+}
+
+var root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App));
+</script>
+</body>
+</html>
